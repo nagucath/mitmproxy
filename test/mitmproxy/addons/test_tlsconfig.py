@@ -548,6 +548,63 @@ class TestTlsConfig:
             # see comment in tlsconfig.py
             assert_alpn(True, [], [])
 
+    @pytest.mark.parametrize(
+        "http2,client_offers,expected",
+        [
+            (True, [b"grpc-exp", b"h2"], (b"h2",)),
+            (
+                True,
+                [b"grpc-exp", b"http/1.1", b"h2"],
+                (b"http/1.1", b"h2"),
+            ),
+            (
+                False,
+                [b"grpc-exp", b"h2", b"http/1.1"],
+                (b"http/1.1",),
+            ),
+            (True, [b"grpc-exp"], (b"grpc-exp",)),
+            (False, [b"grpc-exp", b"h2"], (b"grpc-exp",)),
+        ],
+    )
+    def test_grpc_exp_alpn_fallback(self, http2, client_offers, expected):
+        ta = tlsconfig.TlsConfig()
+        with taddons.context(ta) as tctx:
+            tctx.configure(ta, http2=http2)
+            ctx = _ctx(tctx.options)
+            ctx.server.address = ("example.mitmproxy.org", 443)
+            ctx.client.alpn_offers = client_offers
+            ta.tls_start_server(tls.TlsData(ctx.server, context=ctx))
+            assert ctx.server.alpn_offers == expected
+
+    def test_grpc_exp_alpn_explicit_server_override(self):
+        ta = tlsconfig.TlsConfig()
+        with taddons.context(ta) as tctx:
+            ctx = _ctx(tctx.options)
+            ctx.server.address = ("example.mitmproxy.org", 443)
+            ctx.client.alpn_offers = [b"grpc-exp", b"h2"]
+            ctx.server.alpn_offers = [b"grpc-exp"]
+            ta.tls_start_server(tls.TlsData(ctx.server, context=ctx))
+            assert ctx.server.alpn_offers == [b"grpc-exp"]
+
+    def test_grpc_exp_server_negotiates_http2(self, tdata):
+        ta = tlsconfig.TlsConfig()
+        with taddons.context(ta) as tctx:
+            tctx.configure(
+                ta,
+                ssl_verify_upstream_trusted_ca=tdata.path(
+                    "mitmproxy/net/data/verificationcerts/trusted-root.crt"
+                ),
+            )
+            ctx = _ctx(tctx.options)
+            ctx.server.address = ("example.mitmproxy.org", 443)
+            ctx.client.alpn_offers = [b"grpc-exp", b"h2"]
+            tls_start = tls.TlsData(ctx.server, context=ctx)
+            ta.tls_start_server(tls_start)
+            server = test_tls.SSLTest(server_side=True, alpn=["grpc-exp", "h2"])
+            assert self.do_handshake(tls_start.ssl_conn, server)
+            assert tls_start.ssl_conn.get_alpn_proto_negotiated() == b"h2"
+            assert server.obj.selected_alpn_protocol() == "h2"
+
     def test_no_h2_proxy(self, tdata):
         """Do not negotiate h2 on the client<->proxy connection in secure web proxy mode,
         https://github.com/mitmproxy/mitmproxy/issues/4689"""

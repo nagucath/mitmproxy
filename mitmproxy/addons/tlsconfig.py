@@ -321,15 +321,24 @@ class TlsConfig:
 
         if not server.alpn_offers:
             if client.alpn_offers:
+                alpn_offers = tuple(client.alpn_offers)
+                http_alpns = (
+                    proxy_tls.HTTP_ALPNS if ctx.options.http2 else proxy_tls.HTTP1_ALPNS
+                )
+                if b"grpc-exp" in alpn_offers and any(
+                    alpn in http_alpns for alpn in alpn_offers
+                ):
+                    # Some gRPC clients prefer grpc-exp over h2. Negotiating
+                    # grpc-exp bypasses HTTP/2 detection, so use an advertised
+                    # HTTP protocol that mitmproxy can decode instead.
+                    alpn_offers = tuple(x for x in alpn_offers if x != b"grpc-exp")
                 if ctx.options.http2:
                     # We would perfectly support HTTP/1 -> HTTP/2, but we want to keep things on the same protocol
                     # version. There are some edge cases where we want to mirror the regular server's behavior
                     # accurately, for example header capitalization.
-                    server.alpn_offers = tuple(client.alpn_offers)
+                    server.alpn_offers = alpn_offers
                 else:
-                    server.alpn_offers = tuple(
-                        x for x in client.alpn_offers if x != b"h2"
-                    )
+                    server.alpn_offers = tuple(x for x in alpn_offers if x != b"h2")
             else:
                 # We either have no client TLS or a client without ALPN.
                 # - If the client does use TLS but did not send an ALPN extension, we want to mirror that upstream.

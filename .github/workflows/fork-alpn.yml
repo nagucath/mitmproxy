@@ -1,0 +1,68 @@
+name: Fork ALPN regression
+
+on:
+  push:
+    branches: [grpc-alpn-patch-fallback]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-alpn-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression-and-wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: mhils/workflows/setup-uv@589b2878317d2d57c315c5825f9a1cfe9c76a7c3
+      - name: Install locked dependencies
+        run: uv sync --locked --python 3.14
+      - name: Reproduce the unpatched handshake failure
+        shell: bash
+        run: |
+          cp mitmproxy/addons/tlsconfig.py "$RUNNER_TEMP/tlsconfig.patched.py"
+          trap 'cp "$RUNNER_TEMP/tlsconfig.patched.py" mitmproxy/addons/tlsconfig.py' EXIT
+          git show 046618526875cad96d23043bef78b3ffd422b033:mitmproxy/addons/tlsconfig.py > mitmproxy/addons/tlsconfig.py
+          set +e
+          uv run pytest test/mitmproxy/addons/test_tlsconfig.py -k test_grpc_exp_server_negotiates_http2 --junitxml=baseline-results.xml
+          baseline_status=$?
+          set -e
+          test "$baseline_status" -eq 1
+          uv run python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('baseline-results.xml').getroot()
+          cases = root.findall('.//testcase')
+          assert len(cases) == 1
+          failure = cases[0].find('failure')
+          assert failure is not None and 'grpc-exp' in (failure.text or '')
+          assert not root.findall('.//error')
+          print('Confirmed: upstream negotiates grpc-exp instead of h2')
+          PY
+      - name: Run TLS, protocol detection, and HTTP/2 regressions
+        run: >-
+          uv run pytest
+          test/mitmproxy/addons/test_tlsconfig.py
+          test/mitmproxy/addons/test_next_layer.py
+          test/mitmproxy/proxy/layers/test_tls.py
+          test/mitmproxy/proxy/layers/http/test_http2.py
+          --junitxml=regression-results.xml
+      - name: Check changed Python files
+        run: |
+          uv run ruff check mitmproxy/addons/tlsconfig.py test/mitmproxy/addons/test_tlsconfig.py
+          uv run ruff format --check mitmproxy/addons/tlsconfig.py test/mitmproxy/addons/test_tlsconfig.py
+      - name: Build wheel
+        run: uv build --wheel --out-dir dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mitmproxy-grpc-alpn-${{ github.sha }}
+          path: |
+            dist/*.whl
+            baseline-results.xml
+            regression-results.xml
+          retention-days: 14
